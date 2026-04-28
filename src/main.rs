@@ -136,6 +136,25 @@ const HANDLE_SIZE: f32 = 8.0;
 const TOOLBAR_ROW1_H: f32 = 36.0;
 const TOOLBAR_ROW2_H: f32 = 30.0;
 
+struct ToolbarMetrics {
+    btn_w: f32,
+    padding: f32,
+    color_btn_w: f32,
+}
+
+impl ToolbarMetrics {
+    fn new(tb_width: f32) -> Self {
+        let btn_w = (tb_width / 14.0).clamp(20.0, 36.0);
+        let padding = (btn_w * 0.13).round();
+        let color_btn_w = (btn_w * 0.55).round();
+        Self {
+            btn_w,
+            padding,
+            color_btn_w,
+        }
+    }
+}
+
 struct ScreenshotApp {
     screenshot: Vec<u8>,
     img_w: u32,
@@ -187,7 +206,7 @@ impl ScreenshotApp {
             drag_start: None,
             drag_current: None,
             current_tool: Tool::None,
-            stroke_width: StrokeWidth::Medium,
+            stroke_width: StrokeWidth::Thin,
             line_color: LineColor::Red,
             font_size: FontSize::Medium,
             annotations: Vec::new(),
@@ -680,7 +699,11 @@ impl eframe::App for ScreenshotApp {
 
                 let painter = ui.painter();
                 self.render_screenshot(&painter, screen_rect);
-                self.render_darken_outside(&painter, screen_rect);
+                if self.drag_mode == DragMode::NewSelection {
+                    self.render_selecting_preview(&painter, screen_rect);
+                } else {
+                    self.render_darken_outside(&painter, screen_rect);
+                }
                 self.render_annotations(&painter);
                 self.render_current_drawing(&painter, screen_rect);
                 self.render_selection_border(&painter, screen_rect);
@@ -706,30 +729,12 @@ impl eframe::App for ScreenshotApp {
                 PendingAction::CopyToClipboard => {
                     info!("执行复制到剪贴板，延迟退出以确保 X11 剪贴板持久化");
                     self.copy_to_clipboard();
-                    self.exit_countdown = 90;
+                    self.exit_countdown = 30;
                 }
                 PendingAction::Close => {
                     info!("关闭工具");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-            }
-        }
-
-        if self.exit_countdown > 0 {
-            let painter = ctx.debug_painter();
-            let toast = match self.exit_countdown {
-                n if n > 60 => "已复制到剪贴板 ✓",
-                n if n > 20 => "已保存到文件 ✓",
-                _ => "",
-            };
-            if !toast.is_empty() {
-                painter.text(
-                    Pos2::new(20.0, 50.0),
-                    egui::Align2::LEFT_TOP,
-                    toast,
-                    egui::FontId::proportional(18.0),
-                    Color32::from_rgb(80, 255, 80),
-                );
             }
         }
 
@@ -969,14 +974,11 @@ impl ScreenshotApp {
             None => return,
         };
 
-        let _row1_y = tb.min.y;
+        let m = ToolbarMetrics::new(tb.width());
         let row2_y = tb.min.y + TOOLBAR_ROW1_H;
 
         let col_x = pos.x - tb.min.x;
-        let sel_w = tb.width();
-        let btn_w = 36.0;
-        let padding = 4.0;
-        let divider_x = sel_w * 0.7;
+        let divider_x = tb.width() * 0.7;
 
         if pos.y < row2_y {
             if col_x < divider_x {
@@ -988,10 +990,9 @@ impl ScreenshotApp {
                     Tool::Text,
                     Tool::Mosaic,
                 ];
-                let tool_labels = ["口", "○", "↗", "✎", "T", "▩"];
-                for (i, (&tool, _)) in tools.iter().zip(tool_labels.iter()).enumerate() {
-                    let bx = padding + i as f32 * (btn_w + 2.0);
-                    if col_x >= bx && col_x < bx + btn_w {
+                for (i, &tool) in tools.iter().enumerate() {
+                    let bx = m.padding + i as f32 * (m.btn_w + 2.0);
+                    if col_x >= bx && col_x < bx + m.btn_w {
                         info!("选择标注工具: {:?}, 旧状态: {:?}", tool, self.state);
                         self.current_tool = tool;
                         if self.state == AppState::Adjusting {
@@ -1003,18 +1004,17 @@ impl ScreenshotApp {
                         return;
                     }
                 }
-                let save_x = padding + 6.0 * (btn_w + 2.0);
-                if col_x >= save_x && col_x < save_x + btn_w {
+                let save_x = m.padding + 6.0 * (m.btn_w + 2.0);
+                if col_x >= save_x && col_x < save_x + m.btn_w {
                     info!("点击下载按钮");
                     self.pending_action = Some(PendingAction::SaveToFile);
                     return;
                 }
             } else {
-                let actions = ["↩", "✕", "✓"];
-                let right_start = divider_x + padding;
-                for (i, _) in actions.iter().enumerate() {
-                    let bx = right_start + i as f32 * (btn_w + 2.0);
-                    if col_x >= bx && col_x < bx + btn_w {
+                let right_start = divider_x + m.padding;
+                for i in 0..3 {
+                    let bx = right_start + i as f32 * (m.btn_w + 2.0);
+                    if col_x >= bx && col_x < bx + m.btn_w {
                         match i {
                             0 => {
                                 debug!("点击撤销");
@@ -1044,17 +1044,16 @@ impl ScreenshotApp {
             if is_draw_tool {
                 let widths = [StrokeWidth::Thin, StrokeWidth::Medium, StrokeWidth::Thick];
                 for (i, &w) in widths.iter().enumerate() {
-                    let bx = padding + i as f32 * (btn_w + 2.0);
-                    if col_x >= bx && col_x < bx + btn_w {
+                    let bx = m.padding + i as f32 * (m.btn_w + 2.0);
+                    if col_x >= bx && col_x < bx + m.btn_w {
                         self.stroke_width = w;
                         return;
                     }
                 }
-                let color_start = padding + 3.0 * (btn_w + 2.0) + 8.0;
-                let color_btn_w = 20.0;
+                let color_start = m.padding + 3.0 * (m.btn_w + 2.0) + 8.0;
                 for (i, &(lc, _)) in COLORS.iter().enumerate() {
-                    let bx = color_start + i as f32 * (color_btn_w + 6.0);
-                    if col_x >= bx && col_x < bx + color_btn_w {
+                    let bx = color_start + i as f32 * (m.color_btn_w + 6.0);
+                    if col_x >= bx && col_x < bx + m.color_btn_w {
                         self.line_color = lc;
                         return;
                     }
@@ -1062,17 +1061,16 @@ impl ScreenshotApp {
             } else if is_text_tool {
                 let sizes = [FontSize::Small, FontSize::Medium, FontSize::Large];
                 for (i, &fs) in sizes.iter().enumerate() {
-                    let bx = padding + i as f32 * (btn_w + 2.0);
-                    if col_x >= bx && col_x < bx + btn_w {
+                    let bx = m.padding + i as f32 * (m.btn_w + 2.0);
+                    if col_x >= bx && col_x < bx + m.btn_w {
                         self.font_size = fs;
                         return;
                     }
                 }
-                let color_start = padding + 3.0 * (btn_w + 2.0) + 8.0;
-                let color_btn_w = 20.0;
+                let color_start = m.padding + 3.0 * (m.btn_w + 2.0) + 8.0;
                 for (i, &(lc, _)) in COLORS.iter().enumerate() {
-                    let bx = color_start + i as f32 * (color_btn_w + 6.0);
-                    if col_x >= bx && col_x < bx + color_btn_w {
+                    let bx = color_start + i as f32 * (m.color_btn_w + 6.0);
+                    if col_x >= bx && col_x < bx + m.color_btn_w {
                         self.line_color = lc;
                         return;
                     }
@@ -1105,6 +1103,47 @@ impl ScreenshotApp {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             painter.image(texture.id(), screen_rect, uv, Color32::WHITE);
         }
+    }
+
+    fn render_selecting_preview(&self, painter: &egui::Painter, screen_rect: Rect) {
+        let (start, end) = match (self.drag_start, self.drag_current) {
+            (Some(s), Some(e)) => (s, e),
+            _ => return,
+        };
+        let sel = Rect::from_two_pos(start, end);
+        if sel.width() < 2.0 || sel.height() < 2.0 {
+            return;
+        }
+
+        let dark = Color32::from_black_alpha(160);
+        painter.rect_filled(
+            Rect::from_min_max(screen_rect.min, Pos2::new(screen_rect.max.x, sel.min.y)),
+            0.0,
+            dark,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(screen_rect.min.x, sel.max.y), screen_rect.max),
+            0.0,
+            dark,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(screen_rect.min.x, sel.min.y),
+                Pos2::new(sel.min.x, sel.max.y),
+            ),
+            0.0,
+            dark,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(sel.max.x, sel.min.y),
+                Pos2::new(screen_rect.max.x, sel.max.y),
+            ),
+            0.0,
+            dark,
+        );
+
+        painter.rect_stroke(sel, 0.0, Stroke::new(2.0, Color32::from_rgb(0, 140, 255)));
     }
 
     fn render_darken_outside(&self, painter: &egui::Painter, screen_rect: Rect) {
@@ -1289,6 +1328,7 @@ impl ScreenshotApp {
             None => return,
         };
 
+        let m = ToolbarMetrics::new(tb.width());
         let painter = ui.painter();
         let bg = Color32::from_rgba_premultiplied(40, 40, 40, 230);
         painter.rect_filled(tb, 4.0, bg);
@@ -1296,8 +1336,6 @@ impl ScreenshotApp {
         let divider_x = tb.min.x + tb.width() * 0.7;
 
         let row1_y = tb.min.y;
-        let btn_w = 30.0;
-        let padding = 4.0;
 
         let tool_labels = ["口", "○", "↗", "✎", "T", "▩"];
         let tools = [
@@ -1309,41 +1347,41 @@ impl ScreenshotApp {
             Tool::Mosaic,
         ];
 
+        let font_scaled = |s: f32| -> egui::FontId {
+            let scale = m.btn_w / 30.0;
+            egui::FontId::proportional(s * scale)
+        };
+
         for (i, label) in tool_labels.iter().enumerate() {
-            let bx = tb.min.x + padding + i as f32 * (btn_w + 2.0);
+            let bx = tb.min.x + m.padding + i as f32 * (m.btn_w + 2.0);
             let btn_rect = Rect::from_min_size(
                 Pos2::new(bx, row1_y + 3.0),
-                Vec2::new(btn_w, TOOLBAR_ROW1_H - 6.0),
+                Vec2::new(m.btn_w, TOOLBAR_ROW1_H - 6.0),
             );
 
-            let bg_color = if self.current_tool == tools[i] {
-                Color32::from_rgba_premultiplied(0, 122, 255, 180)
-            } else {
-                Color32::TRANSPARENT
-            };
-            if bg_color != Color32::TRANSPARENT {
-                painter.rect_filled(btn_rect, 4.0, bg_color);
+            if self.current_tool == tools[i] {
+                painter.rect_filled(btn_rect, 4.0, Color32::from_rgba_premultiplied(0, 122, 255, 180));
             }
 
             painter.text(
                 btn_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 *label,
-                egui::FontId::proportional(16.0),
+                font_scaled(16.0),
                 Color32::WHITE,
             );
         }
 
-        let save_x = tb.min.x + padding + 6.0 * (btn_w + 2.0);
+        let save_x = tb.min.x + m.padding + 6.0 * (m.btn_w + 2.0);
         let save_rect = Rect::from_min_size(
             Pos2::new(save_x, row1_y + 3.0),
-            Vec2::new(btn_w, TOOLBAR_ROW1_H - 6.0),
+            Vec2::new(m.btn_w, TOOLBAR_ROW1_H - 6.0),
         );
         painter.text(
             save_rect.center(),
             egui::Align2::CENTER_CENTER,
             "↓",
-            egui::FontId::proportional(16.0),
+            font_scaled(16.0),
             Color32::WHITE,
         );
 
@@ -1353,12 +1391,12 @@ impl ScreenshotApp {
         );
 
         let action_labels = ["↩", "✕", "✓"];
-        let right_start = divider_x + padding;
+        let right_start = divider_x + m.padding;
         for (i, label) in action_labels.iter().enumerate() {
-            let bx = right_start + i as f32 * (btn_w + 2.0);
+            let bx = right_start + i as f32 * (m.btn_w + 2.0);
             let btn_rect = Rect::from_min_size(
                 Pos2::new(bx, row1_y + 3.0),
-                Vec2::new(btn_w, TOOLBAR_ROW1_H - 6.0),
+                Vec2::new(m.btn_w, TOOLBAR_ROW1_H - 6.0),
             );
             let color = match i {
                 1 => Color32::from_rgb(255, 80, 80),
@@ -1369,7 +1407,7 @@ impl ScreenshotApp {
                 btn_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 *label,
-                egui::FontId::proportional(16.0),
+                font_scaled(16.0),
                 color,
             );
         }
@@ -1383,34 +1421,27 @@ impl ScreenshotApp {
 
         if is_draw_tool {
             let widths = [StrokeWidth::Thin, StrokeWidth::Medium, StrokeWidth::Thick];
-            let width_labels = ["细", "中", "粗"];
-            for (i, (&w, label)) in widths.iter().zip(width_labels.iter()).enumerate() {
-                let bx = tb.min.x + padding + i as f32 * (btn_w + 2.0);
+            let radii = [3.0, 5.0, 7.0];
+            for (i, (&w, &r)) in widths.iter().zip(radii.iter()).enumerate() {
+                let bx = tb.min.x + m.padding + i as f32 * (m.btn_w + 2.0);
                 let btn_rect = Rect::from_min_size(
                     Pos2::new(bx, row2_y + 2.0),
-                    Vec2::new(btn_w, TOOLBAR_ROW2_H - 4.0),
+                    Vec2::new(m.btn_w, TOOLBAR_ROW2_H - 4.0),
                 );
 
                 if self.stroke_width == w {
                     painter.rect_filled(btn_rect, 3.0, Color32::from_rgba_premultiplied(0, 122, 255, 150));
                 }
 
-                painter.text(
-                    btn_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    *label,
-                    egui::FontId::proportional(13.0),
-                    Color32::WHITE,
-                );
+                painter.circle_filled(btn_rect.center(), r, Color32::WHITE);
             }
 
-            let color_start = tb.min.x + padding + 3.0 * (btn_w + 2.0) + 8.0;
-            let color_btn_w = 20.0;
+            let color_start = tb.min.x + m.padding + 3.0 * (m.btn_w + 2.0) + 8.0;
             for (i, &(lc, col)) in COLORS.iter().enumerate() {
-                let bx = color_start + i as f32 * (color_btn_w + 6.0);
+                let bx = color_start + i as f32 * (m.color_btn_w + 6.0);
                 let cr = Rect::from_min_size(
                     Pos2::new(bx, row2_y + 4.0),
-                    Vec2::new(color_btn_w, TOOLBAR_ROW2_H - 8.0),
+                    Vec2::new(m.color_btn_w, TOOLBAR_ROW2_H - 8.0),
                 );
                 painter.rect_filled(cr, 3.0, col);
 
@@ -1422,10 +1453,10 @@ impl ScreenshotApp {
             let sizes = [FontSize::Small, FontSize::Medium, FontSize::Large];
             let size_labels = ["小A", "中A", "大A"];
             for (i, (&fs, label)) in sizes.iter().zip(size_labels.iter()).enumerate() {
-                let bx = tb.min.x + padding + i as f32 * (btn_w + 2.0);
+                let bx = tb.min.x + m.padding + i as f32 * (m.btn_w + 2.0);
                 let btn_rect = Rect::from_min_size(
                     Pos2::new(bx, row2_y + 2.0),
-                    Vec2::new(btn_w, TOOLBAR_ROW2_H - 4.0),
+                    Vec2::new(m.btn_w, TOOLBAR_ROW2_H - 4.0),
                 );
 
                 if self.font_size == fs {
@@ -1436,18 +1467,17 @@ impl ScreenshotApp {
                     btn_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     *label,
-                    egui::FontId::proportional(13.0),
+                    font_scaled(13.0),
                     Color32::WHITE,
                 );
             }
 
-            let color_start = tb.min.x + padding + 3.0 * (btn_w + 2.0) + 8.0;
-            let color_btn_w = 20.0;
+            let color_start = tb.min.x + m.padding + 3.0 * (m.btn_w + 2.0) + 8.0;
             for (i, &(lc, col)) in COLORS.iter().enumerate() {
-                let bx = color_start + i as f32 * (color_btn_w + 6.0);
+                let bx = color_start + i as f32 * (m.color_btn_w + 6.0);
                 let cr = Rect::from_min_size(
                     Pos2::new(bx, row2_y + 4.0),
-                    Vec2::new(color_btn_w, TOOLBAR_ROW2_H - 8.0),
+                    Vec2::new(m.color_btn_w, TOOLBAR_ROW2_H - 8.0),
                 );
                 painter.rect_filled(cr, 3.0, col);
 

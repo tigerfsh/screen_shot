@@ -56,9 +56,10 @@ enum LineColor {
     Green,
     Blue,
     White,
+    Custom(Color32),
 }
 
-const COLORS: [(LineColor, Color32); 5] = [
+const PRESET_COLORS: [(LineColor, Color32); 5] = [
     (LineColor::Red, Color32::from_rgb(255, 59, 48)),
     (LineColor::Yellow, Color32::from_rgb(255, 204, 0)),
     (LineColor::Green, Color32::from_rgb(52, 199, 89)),
@@ -68,7 +69,10 @@ const COLORS: [(LineColor, Color32); 5] = [
 
 impl LineColor {
     fn to_color32(self) -> Color32 {
-        COLORS.iter().find(|(c, _)| *c == self).unwrap().1
+        match self {
+            LineColor::Custom(c) => c,
+            _ => PRESET_COLORS.iter().find(|(c, _)| *c == self).unwrap().1,
+        }
     }
 }
 
@@ -196,6 +200,9 @@ struct ScreenshotApp {
 
     pending_action: Option<PendingAction>,
     exit_countdown: i32,
+
+    show_color_picker: bool,
+    show_size_picker: bool,
 }
 
 impl ScreenshotApp {
@@ -233,6 +240,8 @@ impl ScreenshotApp {
             text_input_pos: None,
             pending_action: None,
             exit_countdown: 0,
+            show_color_picker: false,
+            show_size_picker: false,
         }
     }
 
@@ -246,6 +255,34 @@ impl ScreenshotApp {
 
     fn is_in_toolbar(&self, pos: Pos2) -> bool {
         self.toolbar_rect().map_or(false, |r| r.contains(pos))
+    }
+
+    fn color_picker_rect(&self) -> Option<Rect> {
+        let tb = self.toolbar_rect()?;
+        let picker_w = 180.0;
+        let picker_h = 230.0;
+        Some(Rect::from_center_size(
+            Pos2::new(tb.center().x, tb.max.y + picker_h / 2.0 + 12.0),
+            Vec2::new(picker_w, picker_h),
+        ))
+    }
+
+    fn is_in_color_picker(&self, pos: Pos2) -> bool {
+        self.color_picker_rect().map_or(false, |r| r.contains(pos))
+    }
+
+    fn size_picker_rect(&self) -> Option<Rect> {
+        let tb = self.toolbar_rect()?;
+        let x = tb.min.x + tb_button_x(0);
+        let y = tb.min.y + TOOLBAR_ROW1_H + TOOLBAR_ROW2_H;
+        Some(Rect::from_min_size(
+            Pos2::new(x, y),
+            Vec2::new(BTN_W * 2.0 + BTN_GAP, 80.0),
+        ))
+    }
+
+    fn is_in_size_picker(&self, pos: Pos2) -> bool {
+        self.size_picker_rect().map_or(false, |r| r.contains(pos))
     }
 
     fn is_in_selection(&self, pos: Pos2) -> bool {
@@ -526,15 +563,14 @@ impl ScreenshotApp {
     }
 
     fn load_font() -> Option<Vec<u8>> {
-        let paths = [
+        let paths: &[&str] = &[
             "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         ];
         for path in paths {
-            if let Ok(data) = std::fs::read(path) {
+            if let Ok(data) = std::fs::read(*path) {
                 return Some(data);
             }
         }
@@ -565,7 +601,7 @@ impl ScreenshotApp {
         for c in text.chars() {
             let glyph_id = font.glyph_id(c);
             let glyph = glyph_id.with_scale(scale);
-            if let Some(outlined) = font.outline_glyph(glyph) {
+            let advance = if let Some(outlined) = font.outline_glyph(glyph) {
                 let bounds = outlined.px_bounds();
                 let h = bounds.height() as f32;
                 let bx = (cursor_x + bounds.min.x + italic_skew * (h / size)).round() as i32;
@@ -586,20 +622,25 @@ impl ScreenshotApp {
                 });
 
                 if bold {
-                    outlined.draw(|x, y, c| {
-                        let skew_x = italic_skew * (y as f32 / h.max(1.0));
-                        let gx = (bx + x as i32 + 1 + skew_x as i32).max(0).min(img.width() as i32 - 1) as u32;
-                        let gy = (by + y as i32).max(0).min(img.height() as i32 - 1) as u32;
-                        let alpha = (c * 255.0) as u8;
-                        if alpha > 0 {
-                            let existing = *img.get_pixel(gx, gy);
-                            let blended = blend_pixel(existing, color, alpha);
-                            img.put_pixel(gx, gy, blended);
-                        }
-                    });
+                    for (dx, dy) in &[(1i32, 0i32), (-1, 0), (0, 1), (1, 1)] {
+                        outlined.draw(|x, y, c| {
+                            let skew_x = italic_skew * (y as f32 / h.max(1.0));
+                            let gx = (bx + x as i32 + dx + skew_x as i32).max(0).min(img.width() as i32 - 1) as u32;
+                            let gy = (by + y as i32 + dy).max(0).min(img.height() as i32 - 1) as u32;
+                            let alpha = (c * 255.0) as u8;
+                            if alpha > 0 {
+                                let existing = *img.get_pixel(gx, gy);
+                                let blended = blend_pixel(existing, color, alpha);
+                                img.put_pixel(gx, gy, blended);
+                            }
+                        });
+                    }
                 }
-            }
-            cursor_x += scale.x;
+                bounds.max.x - bounds.min.x
+            } else {
+                scale.x
+            };
+            cursor_x += advance;
         }
 
         if underline {
@@ -682,6 +723,26 @@ fn blend_pixel(bg: image::Rgba<u8>, fg: Color32, alpha: u8) -> image::Rgba<u8> {
     ])
 }
 
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let hp = h / (std::f32::consts::PI / 3.0);
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
+}
+
 impl eframe::App for ScreenshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.texture.is_none() {
@@ -753,6 +814,8 @@ impl eframe::App for ScreenshotApp {
                 self.render_selection_border(&painter, screen_rect);
                 self.render_handles(&painter, screen_rect);
                 self.render_toolbar(ui, screen_rect);
+                self.render_size_picker(ctx, screen_rect);
+                self.render_color_picker(ctx, screen_rect);
             });
 
         if self.exit_countdown > 0 {
@@ -797,6 +860,21 @@ impl ScreenshotApp {
         let released = ctx.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
         if pressed {
+            if self.show_size_picker {
+                if self.is_in_size_picker(pointer) {
+                    return;
+                }
+                self.show_size_picker = false;
+                return;
+            }
+            if self.show_color_picker {
+                if self.is_in_color_picker(pointer) {
+                    return;
+                }
+                self.show_color_picker = false;
+                return;
+            }
+
             if self.is_in_toolbar(pointer) {
                 debug!("工具栏点击: ({:.0}, {:.0})", pointer.x, pointer.y);
                 self.handle_toolbar_click(pointer);
@@ -1095,33 +1173,33 @@ impl ScreenshotApp {
                     if col_x >= bx && col_x < bx + BTN_W { self.stroke_width = w; return; }
                 }
                 let color_start = tb_button_x(3) + 8.0;
-                for (i, &(lc, _)) in COLORS.iter().enumerate() {
+                for (i, &(lc, _)) in PRESET_COLORS.iter().enumerate() {
                     let bx = color_start + i as f32 * (24.0);
                     if col_x >= bx && col_x < bx + 20.0 { self.line_color = lc; return; }
                 }
             } else if is_text_tool {
-                let sizes = [FontSize::Small, FontSize::Medium, FontSize::Large];
-                for (i, &fs) in sizes.iter().enumerate() {
-                    let bx = tb_button_x(i);
-                    if col_x >= bx && col_x < bx + BTN_W { self.font_size = fs; return; }
+                let sz_bx = tb_button_x(0);
+                if col_x >= sz_bx && col_x < sz_bx + BTN_W {
+                    self.show_size_picker = !self.show_size_picker;
+                    self.show_color_picker = false;
+                    return;
                 }
-                let style_start = tb_button_x(3) + 4.0;
-                let style_w = 22.0;
-                for i in 0..3 {
-                    let sx = style_start + i as f32 * (style_w + 2.0);
-                    if col_x >= sx && col_x < sx + style_w {
+                for i in 1..4 {
+                    let bx = tb_button_x(i);
+                    if col_x >= bx && col_x < bx + BTN_W {
                         match i {
-                            0 => { self.bold = !self.bold; return; }
-                            1 => { self.italic = !self.italic; return; }
-                            2 => { self.underline = !self.underline; return; }
+                            1 => { self.bold = !self.bold; return; }
+                            2 => { self.italic = !self.italic; return; }
+                            3 => { self.underline = !self.underline; return; }
                             _ => {}
                         }
                     }
                 }
-                let color_start = style_start + 3.0 * (style_w + 2.0) + 8.0;
-                for (i, &(lc, _)) in COLORS.iter().enumerate() {
-                    let bx = color_start + i as f32 * 24.0;
-                    if col_x >= bx && col_x < bx + 20.0 { self.line_color = lc; return; }
+                let cp_bx = tb_button_x(4);
+                if col_x >= cp_bx && col_x < cp_bx + BTN_W {
+                    self.show_color_picker = !self.show_color_picker;
+                    self.show_size_picker = false;
+                    return;
                 }
             }
         }
@@ -1255,19 +1333,26 @@ impl ScreenshotApp {
                     color,
                     size,
                     bold,
-                    italic: _italic,
+                    italic,
                     underline,
                 } => {
                     let fid = egui::FontId::proportional(*size);
                     if *bold {
-                        painter.text(*position + Vec2::new(0.5, 0.0), egui::Align2::LEFT_TOP, text, fid.clone(), *color);
+                        painter.text(*position + Vec2::new(1.2, 0.0), egui::Align2::LEFT_TOP, text, fid.clone(), *color);
+                        painter.text(*position + Vec2::new(0.0, 1.0), egui::Align2::LEFT_TOP, text, fid.clone(), *color);
                     }
-                    painter.text(*position, egui::Align2::LEFT_TOP, text, fid, *color);
+                    if *italic {
+                        let italic_offset = *size * 0.15;
+                        painter.text(*position + Vec2::new(italic_offset, 0.0), egui::Align2::LEFT_TOP, text, fid, *color);
+                    } else {
+                        painter.text(*position, egui::Align2::LEFT_TOP, text, fid, *color);
+                    }
                     if *underline {
                         let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(*size), *color);
                         let y = position.y + galley.size().y + 1.0;
+                        let offset = if *italic { *size * 0.15 } else { 0.0 };
                         painter.line_segment(
-                            [Pos2::new(position.x, y), Pos2::new(position.x + galley.size().x, y)],
+                            [Pos2::new(position.x + offset, y), Pos2::new(position.x + galley.size().x + offset, y)],
                             Stroke::new(1.0, *color),
                         );
                     }
@@ -1288,42 +1373,45 @@ impl ScreenshotApp {
                     );
                 }
             }
+        }
 
-            if self.text_input_active {
-                if let Some(pos) = self.text_input_pos {
-                    let txt = &self.text_input_buffer;
-                    let display = if txt.is_empty() { " " } else { txt.as_str() };
-                    let size = self.font_size.value();
-                    let color = self.line_color.to_color32();
-                    let fid = egui::FontId::proportional(size);
+        if self.text_input_active {
+            if let Some(pos) = self.text_input_pos {
+                let txt = &self.text_input_buffer;
+                let display = if txt.is_empty() { " " } else { txt.as_str() };
+                let size = self.font_size.value();
+                let color = self.line_color.to_color32();
+                let fid = egui::FontId::proportional(size);
 
-                    let galley = painter.layout_no_wrap(display.to_string(), fid.clone(), color);
-                    let txt_w = galley.size().x.max(10.0);
-                    let txt_h = galley.size().y.max(size + 4.0);
+                let galley = painter.layout_no_wrap(display.to_string(), fid.clone(), color);
+                let txt_w = galley.size().x.max(10.0);
+                let txt_h = galley.size().y.max(size + 4.0);
 
-                    let bg_rect = Rect::from_min_size(pos, Vec2::new(txt_w + 16.0, txt_h + 8.0));
-                    painter.rect_filled(bg_rect, 0.0, Color32::from_rgba_premultiplied(40, 40, 40, 200));
-                    painter.rect_stroke(bg_rect, 0.0, Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 122, 255, 200)));
+                let bg_rect = Rect::from_min_size(pos, Vec2::new(txt_w + 16.0, txt_h + 8.0));
+                painter.rect_filled(bg_rect, 0.0, Color32::from_rgba_premultiplied(40, 40, 40, 200));
+                painter.rect_stroke(bg_rect, 0.0, Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 122, 255, 200)));
 
-                    let text_pos = pos + Vec2::new(8.0, 4.0);
-                    if self.bold {
-                        painter.text(text_pos + Vec2::new(0.5, 0.0), egui::Align2::LEFT_TOP, display, fid.clone(), color);
-                    }
-                    painter.text(text_pos, egui::Align2::LEFT_TOP, display, fid, color);
-                    if self.underline && !txt.is_empty() {
-                        let y = text_pos.y + txt_h - 4.0;
-                        painter.line_segment(
-                            [Pos2::new(text_pos.x, y), Pos2::new(text_pos.x + txt_w, y)],
-                            Stroke::new(1.0, color),
-                        );
-                    }
-
-                    let caret_x = text_pos.x + galley.size().x + 1.0;
+                let text_pos = pos + Vec2::new(8.0, 4.0);
+                let italic_offset = if self.italic { size * 0.15 } else { 0.0 };
+                let draw_pos = text_pos + Vec2::new(italic_offset, 0.0);
+                if self.bold {
+                    painter.text(draw_pos + Vec2::new(1.2, 0.0), egui::Align2::LEFT_TOP, display, fid.clone(), color);
+                    painter.text(draw_pos + Vec2::new(0.0, 1.0), egui::Align2::LEFT_TOP, display, fid.clone(), color);
+                }
+                painter.text(draw_pos, egui::Align2::LEFT_TOP, display, fid, color);
+                if self.underline && !txt.is_empty() {
+                    let y = text_pos.y + txt_h - 4.0;
                     painter.line_segment(
-                        [Pos2::new(caret_x, text_pos.y + 2.0), Pos2::new(caret_x, text_pos.y + txt_h - 4.0)],
-                        Stroke::new(1.5, color),
+                        [Pos2::new(text_pos.x + italic_offset, y), Pos2::new(text_pos.x + txt_w + italic_offset, y)],
+                        Stroke::new(1.0, color),
                     );
                 }
+
+                let caret_x = text_pos.x + galley.size().x + 1.0;
+                painter.line_segment(
+                    [Pos2::new(caret_x, text_pos.y + 2.0), Pos2::new(caret_x, text_pos.y + txt_h - 4.0)],
+                    Stroke::new(1.5, color),
+                );
             }
         }
     }
@@ -1551,7 +1639,7 @@ impl ScreenshotApp {
                 painter.circle_filled(br.center(), r, white);
             }
             let color_start = tb.min.x + tb_button_x(3) + 8.0;
-            for (i, &(lc, col)) in COLORS.iter().enumerate() {
+            for (i, &(lc, col)) in PRESET_COLORS.iter().enumerate() {
                 let bx = color_start + i as f32 * 24.0;
                 let cr = Rect::from_min_size(Pos2::new(bx, row2_y + 5.0), Vec2::new(20.0, TOOLBAR_ROW2_H - 10.0));
                 painter.rect_filled(cr, 3.0, col);
@@ -1560,38 +1648,238 @@ impl ScreenshotApp {
                 }
             }
         } else if is_text_tool {
-            let sizes = [FontSize::Small, FontSize::Medium, FontSize::Large];
-            let size_labels = ["小", "中", "大"];
-            for (i, (&fs, label)) in sizes.iter().zip(size_labels.iter()).enumerate() {
-                let bx = tb.min.x + tb_button_x(i);
-                let br = Rect::from_min_size(Pos2::new(bx, row2_y + 2.0), Vec2::new(BTN_W, TOOLBAR_ROW2_H - 4.0));
-                if self.font_size == fs {
-                    painter.rect_filled(br, 3.0, active_bg);
-                }
-                painter.text(br.center(), egui::Align2::CENTER_CENTER, *label, egui::FontId::proportional(12.0), white);
+            let sz_btn = tb_button_rect(tb, 0, row2_y);
+            if self.show_size_picker {
+                painter.rect_filled(sz_btn, 3.0, active_bg);
             }
+            let sz_label = match self.font_size {
+                FontSize::Small => "小",
+                FontSize::Medium => "中",
+                FontSize::Large => "大",
+            };
+            painter.text(sz_btn.center(), egui::Align2::CENTER_CENTER, sz_label, egui::FontId::proportional(11.0), white);
+            let arrow = Rect::from_min_size(
+                Pos2::new(sz_btn.max.x - 12.0, sz_btn.min.y + 5.0),
+                Vec2::new(10.0, 10.0),
+            );
+            painter.line_segment(
+                [Pos2::new(arrow.min.x + 2.0, arrow.min.y + 3.0), Pos2::new(arrow.center().x, arrow.max.y - 2.0)],
+                Stroke::new(1.2, white),
+            );
+            painter.line_segment(
+                [Pos2::new(arrow.center().x, arrow.max.y - 2.0), Pos2::new(arrow.max.x - 2.0, arrow.min.y + 3.0)],
+                Stroke::new(1.2, white),
+            );
 
-            let style_start = tb.min.x + tb_button_x(3) + 4.0;
-            let style_w = 22.0;
-            let style_items: [(&str, bool); 3] = [("B", self.bold), ("I", self.italic), ("U", self.underline)];
-            for (j, &(label, active)) in style_items.iter().enumerate() {
-                let sx = style_start + j as f32 * (style_w + 2.0);
-                let sr = Rect::from_min_size(Pos2::new(sx, row2_y + 4.0), Vec2::new(style_w, TOOLBAR_ROW2_H - 8.0));
-                if active {
-                    painter.rect_filled(sr, 3.0, active_bg);
-                }
-                let clr = if active { Color32::from_rgb(100, 200, 255) } else { white };
-                painter.text(sr.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), clr);
+            let bold_btn = tb_button_rect(tb, 1, row2_y);
+            if self.bold {
+                painter.rect_filled(bold_btn, 3.0, active_bg);
             }
+            let bc = if self.bold { Color32::from_rgb(100, 200, 255) } else { white };
+            painter.text(bold_btn.center(), egui::Align2::CENTER_CENTER, "B", egui::FontId::proportional(13.0), bc);
 
-            let color_start = style_start + 3.0 * (style_w + 2.0) + 8.0;
-            for (i, &(lc, col)) in COLORS.iter().enumerate() {
-                let bx = color_start + i as f32 * 24.0;
-                let cr = Rect::from_min_size(Pos2::new(bx, row2_y + 5.0), Vec2::new(20.0, TOOLBAR_ROW2_H - 10.0));
-                painter.rect_filled(cr, 3.0, col);
-                if self.line_color == lc {
-                    painter.rect_stroke(cr.expand(2.0), 2.0, Stroke::new(2.0, white));
+            let italic_btn = tb_button_rect(tb, 2, row2_y);
+            if self.italic {
+                painter.rect_filled(italic_btn, 3.0, active_bg);
+            }
+            let ic = if self.italic { Color32::from_rgb(100, 200, 255) } else { white };
+            painter.text(italic_btn.center(), egui::Align2::CENTER_CENTER, "I", egui::FontId::proportional(13.0), ic);
+
+            let underline_btn = tb_button_rect(tb, 3, row2_y);
+            if self.underline {
+                painter.rect_filled(underline_btn, 3.0, active_bg);
+            }
+            let uc = if self.underline { Color32::from_rgb(100, 200, 255) } else { white };
+            painter.text(underline_btn.center(), egui::Align2::CENTER_CENTER, "U", egui::FontId::proportional(13.0), uc);
+
+            let color_btn_x = tb.min.x + tb_button_x(4);
+            let color_btn = Rect::from_min_size(Pos2::new(color_btn_x, row2_y + 2.0), Vec2::new(BTN_W, TOOLBAR_ROW2_H - 4.0));
+            if self.show_color_picker {
+                painter.rect_filled(color_btn, 3.0, active_bg);
+            }
+            let cc = self.line_color.to_color32();
+            painter.circle_filled(color_btn.center(), 10.0, cc);
+            painter.circle_stroke(color_btn.center(), 10.0, Stroke::new(1.5, white));
+        }
+    }
+
+    fn render_size_picker(&mut self, ctx: &egui::Context, _screen_rect: Rect) {
+        if !self.show_size_picker {
+            return;
+        }
+
+        let picker_rect = match self.size_picker_rect() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let painter = ctx.debug_painter();
+        let bg = Color32::from_rgba_premultiplied(30, 30, 30, 250);
+        painter.rect_filled(picker_rect, 6.0, bg);
+        painter.rect_stroke(picker_rect, 6.0, Stroke::new(1.0, Color32::from_gray(80)));
+
+        let active_bg = Color32::from_rgba_premultiplied(0, 122, 255, 140);
+        let active_text = Color32::from_rgb(100, 200, 255);
+        let white = Color32::WHITE;
+
+        let items: [(FontSize, &str); 3] = [
+            (FontSize::Small, "小 (16px)"),
+            (FontSize::Medium, "中 (24px)"),
+            (FontSize::Large, "大 (36px)"),
+        ];
+        let item_h = 22.0;
+        let gap = 4.0;
+        for (i, &(fs, label)) in items.iter().enumerate() {
+            let y = picker_rect.min.y + 8.0 + i as f32 * (item_h + gap);
+            let ir = Rect::from_min_size(
+                Pos2::new(picker_rect.min.x + 4.0, y),
+                Vec2::new(picker_rect.width() - 8.0, item_h),
+            );
+            if self.font_size == fs {
+                painter.rect_filled(ir, 3.0, active_bg);
+            }
+            let clr = if self.font_size == fs { active_text } else { white };
+            painter.text(
+                Pos2::new(ir.min.x + 8.0, ir.center().y),
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::proportional(12.0),
+                clr,
+            );
+
+            let pointer = ctx.input(|i| i.pointer.interact_pos());
+            let pressed = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+            if let Some(pp) = pointer {
+                if pressed && ir.contains(pp) {
+                    self.font_size = fs;
+                    self.show_size_picker = false;
                 }
+            }
+        }
+    }
+
+    fn render_color_picker(&mut self, ctx: &egui::Context, _screen_rect: Rect) {
+        if !self.show_color_picker {
+            return;
+        }
+
+        let picker_rect = match self.color_picker_rect() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let wheel_radius = 65.0;
+        let wheel_center = Pos2::new(picker_rect.center().x, picker_rect.min.y + 40.0 + wheel_radius);
+
+        let painter = ctx.debug_painter();
+        let bg = Color32::from_rgba_premultiplied(30, 30, 30, 250);
+        painter.rect_filled(picker_rect, 8.0, bg);
+        painter.rect_stroke(picker_rect, 8.0, Stroke::new(1.0, Color32::from_gray(80)));
+
+        let n_segments = 120;
+        let mut mesh = egui::Mesh::with_texture(egui::TextureId::Managed(0));
+        let center_idx = mesh.vertices.len() as u32;
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: wheel_center,
+            uv: Pos2::ZERO,
+            color: Color32::WHITE,
+        });
+        for i in 0..=n_segments {
+            let angle = (i as f32 / n_segments as f32) * std::f32::consts::TAU;
+            let sat = if i == n_segments { 1.0 } else { 1.0 };
+            let (r, g, b) = hsv_to_rgb(angle, sat, 1.0);
+            let color = Color32::from_rgb(r, g, b);
+            let x = wheel_center.x + wheel_radius * angle.cos();
+            let y = wheel_center.y + wheel_radius * angle.sin();
+            let idx = mesh.vertices.len() as u32;
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: Pos2::new(x, y),
+                uv: Pos2::ZERO,
+                color,
+            });
+            if i > 0 {
+                mesh.indices.push(center_idx);
+                mesh.indices.push(idx - 1);
+                mesh.indices.push(idx);
+            }
+        }
+        painter.add(egui::Shape::Mesh(mesh));
+
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let pressed = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+        if let Some(pointer_pos) = pointer {
+            let dx = pointer_pos.x - wheel_center.x;
+            let dy = pointer_pos.y - wheel_center.y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if pressed && dist <= wheel_radius {
+                let angle = dy.atan2(dx);
+                let hue = if angle < 0.0 { angle + std::f32::consts::TAU } else { angle };
+                let sat = (dist / wheel_radius).min(1.0);
+                let (r, g, b) = hsv_to_rgb(hue, sat, 1.0);
+                self.line_color = LineColor::Custom(Color32::from_rgb(r, g, b));
+            }
+        }
+
+        let current_color = self.line_color.to_color32();
+        let preview_rect = Rect::from_center_size(
+            Pos2::new(picker_rect.center().x, picker_rect.max.y - 28.0),
+            Vec2::new(100.0, 24.0),
+        );
+        painter.rect_filled(preview_rect, 4.0, current_color);
+        painter.rect_stroke(preview_rect, 4.0, Stroke::new(1.0, Color32::WHITE));
+
+        let label_pos = preview_rect.center();
+        let label_color = if current_color.r() as u16 + current_color.g() as u16 + current_color.b() as u16 > 380 {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        };
+        painter.text(
+            label_pos,
+            egui::Align2::CENTER_CENTER,
+            "当前颜色",
+            egui::FontId::proportional(11.0),
+            label_color,
+        );
+
+        let preset_y = wheel_center.y + wheel_radius + 14.0;
+        let preset_start_x = picker_rect.center().x - 5.0 * 22.0 / 2.0;
+        for (i, &(_, col)) in PRESET_COLORS.iter().enumerate() {
+            let bx = preset_start_x + i as f32 * 22.0;
+            let pr = Rect::from_min_size(Pos2::new(bx, preset_y), Vec2::new(18.0, 18.0));
+            painter.rect_filled(pr, 3.0, col);
+            painter.rect_stroke(pr, 3.0, Stroke::new(1.0, Color32::from_gray(120)));
+            if let Some(pointer_pos) = pointer {
+                if pressed && pr.contains(pointer_pos) {
+                    match i {
+                        0 => self.line_color = LineColor::Red,
+                        1 => self.line_color = LineColor::Yellow,
+                        2 => self.line_color = LineColor::Green,
+                        3 => self.line_color = LineColor::Blue,
+                        4 => self.line_color = LineColor::White,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let close_btn = Rect::from_center_size(
+            Pos2::new(picker_rect.max.x - 16.0, picker_rect.min.y + 16.0),
+            Vec2::new(20.0, 20.0),
+        );
+        let close_color = Color32::from_rgb(200, 200, 200);
+        painter.line_segment(
+            [Pos2::new(close_btn.min.x + 4.0, close_btn.min.y + 4.0), Pos2::new(close_btn.max.x - 4.0, close_btn.max.y - 4.0)],
+            Stroke::new(2.0, close_color),
+        );
+        painter.line_segment(
+            [Pos2::new(close_btn.max.x - 4.0, close_btn.min.y + 4.0), Pos2::new(close_btn.min.x + 4.0, close_btn.max.y - 4.0)],
+            Stroke::new(2.0, close_color),
+        );
+
+        if let Some(pointer_pos) = pointer {
+            if pressed && close_btn.contains(pointer_pos) {
+                self.show_color_picker = false;
             }
         }
     }

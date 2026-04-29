@@ -203,6 +203,8 @@ struct ScreenshotApp {
 
     show_color_picker: bool,
     show_size_picker: bool,
+
+    screen_rect: Rect,
 }
 
 impl ScreenshotApp {
@@ -242,15 +244,43 @@ impl ScreenshotApp {
             exit_countdown: 0,
             show_color_picker: false,
             show_size_picker: false,
+            screen_rect: Rect::ZERO,
         }
+    }
+
+    fn toolbar_has_row2(&self) -> bool {
+        self.current_tool != Tool::None
     }
 
     fn toolbar_rect(&self) -> Option<Rect> {
         let sel = self.selection?;
-        let h = TOOLBAR_ROW1_H + TOOLBAR_ROW2_H;
-        let y = sel.max.y.min(self.img_h as f32 - h);
-        let x = (sel.center().x - TOOLBAR_W / 2.0).max(0.0);
-        Some(Rect::from_min_size(Pos2::new(x, y), Vec2::new(TOOLBAR_W, h)))
+        let h = if self.toolbar_has_row2() {
+            TOOLBAR_ROW1_H + TOOLBAR_ROW2_H
+        } else {
+            TOOLBAR_ROW1_H
+        };
+        let sr = self.screen_rect;
+
+        let x_center = (sel.center().x - TOOLBAR_W / 2.0).max(0.0);
+
+        // 1. Below
+        let y_below = sel.max.y;
+        if y_below + h <= sr.max.y {
+            return Some(Rect::from_min_size(Pos2::new(x_center.min(sr.max.x - TOOLBAR_W), y_below), Vec2::new(TOOLBAR_W, h)));
+        }
+
+        // 2. Above
+        let y_above = sel.min.y - h;
+        if y_above >= sr.min.y {
+            return Some(Rect::from_min_size(Pos2::new(x_center.min(sr.max.x - TOOLBAR_W), y_above), Vec2::new(TOOLBAR_W, h)));
+        }
+
+        // 3. Inside at bottom
+        let y_inside = (sel.max.y - h).max(sel.min.y);
+        Some(Rect::from_min_size(
+            Pos2::new(x_center.min(sr.max.x - TOOLBAR_W).max(sr.min.x), y_inside.max(sr.min.y)),
+            Vec2::new(TOOLBAR_W, h),
+        ))
     }
 
     fn is_in_toolbar(&self, pos: Pos2) -> bool {
@@ -261,8 +291,10 @@ impl ScreenshotApp {
         let tb = self.toolbar_rect()?;
         let picker_w = 180.0;
         let picker_h = 230.0;
+        let y = tb.max.y + picker_h / 2.0 + 8.0;
+        let x = (tb.center().x).max(picker_w / 2.0).min(self.screen_rect.max.x - picker_w / 2.0);
         Some(Rect::from_center_size(
-            Pos2::new(tb.center().x, tb.max.y + picker_h / 2.0 + 12.0),
+            Pos2::new(x, y),
             Vec2::new(picker_w, picker_h),
         ))
     }
@@ -274,7 +306,7 @@ impl ScreenshotApp {
     fn size_picker_rect(&self) -> Option<Rect> {
         let tb = self.toolbar_rect()?;
         let x = tb.min.x + tb_button_x(0);
-        let y = tb.min.y + TOOLBAR_ROW1_H + TOOLBAR_ROW2_H;
+        let y = tb.max.y;
         Some(Rect::from_min_size(
             Pos2::new(x, y),
             Vec2::new(BTN_W * 2.0 + BTN_GAP, 80.0),
@@ -798,6 +830,7 @@ impl eframe::App for ScreenshotApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let screen_rect = ui.max_rect();
+                self.screen_rect = screen_rect;
                 let _pointer_pos = ctx.input(|i| i.pointer.interact_pos());
 
                 self.handle_mouse_events(ctx, screen_rect);
@@ -1124,7 +1157,7 @@ impl ScreenshotApp {
         let col_x = pos.x - tb.min.x;
         let row2_y = tb.min.y + TOOLBAR_ROW1_H;
 
-        if pos.y < row2_y {
+        if pos.y < row2_y || !self.toolbar_has_row2() {
             if col_x < m.divider_x - tb.min.x {
                 let tools = [Tool::Rectangle, Tool::Ellipse, Tool::Arrow, Tool::Brush, Tool::Text, Tool::Mosaic];
                 for (i, &tool) in tools.iter().enumerate() {
@@ -1623,9 +1656,10 @@ impl ScreenshotApp {
             }
         }
 
-        let row2_y = tb.min.y + TOOLBAR_ROW1_H;
-        let is_draw_tool = matches!(self.current_tool, Tool::Rectangle | Tool::Ellipse | Tool::Arrow | Tool::Brush);
-        let is_text_tool = matches!(self.current_tool, Tool::Text);
+        if self.toolbar_has_row2() {
+            let row2_y = tb.min.y + TOOLBAR_ROW1_H;
+            let is_draw_tool = matches!(self.current_tool, Tool::Rectangle | Tool::Ellipse | Tool::Arrow | Tool::Brush);
+            let is_text_tool = matches!(self.current_tool, Tool::Text);
 
         if is_draw_tool {
             let widths = [StrokeWidth::Thin, StrokeWidth::Medium, StrokeWidth::Thick];
@@ -1700,6 +1734,7 @@ impl ScreenshotApp {
             let cc = self.line_color.to_color32();
             painter.circle_filled(color_btn.center(), 10.0, cc);
             painter.circle_stroke(color_btn.center(), 10.0, Stroke::new(1.5, white));
+            }
         }
     }
 

@@ -12,3 +12,6 @@ arboard = "3"
 ab_glyph = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }

@@ -1,6 +1,7 @@
 use chrono::Local;
 use ab_glyph::Font;
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
+use std::sync::Arc;
 use tracing::{debug, info};
 use xcap::Monitor;
 
@@ -197,6 +198,7 @@ struct ScreenshotApp {
     text_input_active: bool,
     text_input_buffer: String,
     text_input_pos: Option<Pos2>,
+    ime_preedit: String,
 
     pending_action: Option<PendingAction>,
     exit_countdown: i32,
@@ -205,6 +207,8 @@ struct ScreenshotApp {
     show_size_picker: bool,
 
     screen_rect: Rect,
+    ime_was_enabled: bool,
+    font_registered: bool,
 }
 
 impl ScreenshotApp {
@@ -240,11 +244,14 @@ impl ScreenshotApp {
             text_input_active: false,
             text_input_buffer: String::new(),
             text_input_pos: None,
+            ime_preedit: String::new(),
             pending_action: None,
             exit_countdown: 0,
             show_color_picker: false,
             show_size_picker: false,
             screen_rect: Rect::ZERO,
+            ime_was_enabled: false,
+            font_registered: false,
         }
     }
 
@@ -596,16 +603,24 @@ impl ScreenshotApp {
 
     fn load_font() -> Option<Vec<u8>> {
         let paths: &[&str] = &[
-            "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/arphic/ukai.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ];
         for path in paths {
             if let Ok(data) = std::fs::read(*path) {
+                info!("[Font] Loaded: {}", path);
                 return Some(data);
             }
         }
+        info!("[Font] No font found, text rendering will fail");
         None
     }
 
@@ -777,6 +792,18 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 
 impl eframe::App for ScreenshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.font_registered {
+            if let Some(font_data) = Self::load_font() {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert("cjk".into(), Arc::new(egui::FontData::from_owned(font_data)));
+                fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "cjk".into());
+                fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().insert(0, "cjk".into());
+                ctx.set_fonts(fonts);
+                info!("[Font] Registered CJK font with egui for proportional/monospace");
+            }
+            self.font_registered = true;
+        }
+
         if self.texture.is_none() {
             let color_image = egui::ColorImage::from_rgba_unmultiplied(
                 [self.img_w as usize, self.img_h as usize],
@@ -790,12 +817,36 @@ impl eframe::App for ScreenshotApp {
             ctx.request_repaint();
         }
 
+        self.ensure_ime(ctx);
+        self.handle_text_input(ctx);
+
+        // --- Log ALL raw events for debugging ---
+        let frame_modifiers = ctx.input(|i| i.modifiers);
+        ctx.input(|i| {
+            if !i.events.is_empty() {
+                let text_events: Vec<String> = i.events.iter().filter_map(|e| {
+                    match e {
+                        egui::Event::Text(t) => Some(format!("Text({:?})", t)),
+                        egui::Event::Ime(ime) => Some(format!("Ime({:?})", ime)),
+                        egui::Event::Key { key, pressed, .. } if *pressed => Some(format!("Key({:?})", key)),
+                        _ => None,
+                    }
+                }).collect();
+                if !text_events.is_empty() {
+                    info!("[Update] Frame events: state={:?} tool={:?} text_active={} modifiers={:?} events={:?}",
+                        self.state, self.current_tool, self.text_input_active,
+                        frame_modifiers, text_events);
+                }
+            }
+        });
+
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.text_input_active {
                 debug!("Esc 取消文字输入");
                 self.text_input_active = false;
                 self.text_input_buffer.clear();
                 self.text_input_pos = None;
+                self.ime_preedit.clear();
             } else {
                 debug!("Esc 关闭工具");
                 self.pending_action = Some(PendingAction::Close);
@@ -813,16 +864,15 @@ impl eframe::App for ScreenshotApp {
             && self.current_tool != Tool::None
             && ctx.input(|i| i.key_pressed(egui::Key::Enter))
         {
-            info!("Enter 键: Adjusting -> Canvas, 工具: {:?}", self.current_tool);
+            info!("[Update] Enter pressed in Adjusting state, switching to Canvas, tool: {:?}, buf: {:?}", self.current_tool, self.text_input_buffer);
             self.state = AppState::Canvas;
         }
-
-        self.handle_text_input(ctx);
 
         if self.state == AppState::Canvas
             && self.text_input_active
             && ctx.input(|i| i.key_pressed(egui::Key::Enter))
         {
+            info!("[Update] Enter pressed with text_input_active, calling finish_text_input, buf: {:?}", self.text_input_buffer);
             self.finish_text_input();
         }
 
@@ -1051,7 +1101,13 @@ impl ScreenshotApp {
         if !self.text_input_active {
             return;
         }
+        if !self.ime_preedit.is_empty() {
+            info!("[TextInput] finish_text_input: absorbing preedit {:?} into buf", self.ime_preedit);
+            self.text_input_buffer.push_str(&self.ime_preedit);
+            self.ime_preedit.clear();
+        }
         let txt = self.text_input_buffer.clone();
+        info!("[TextInput] finish_text_input: saving text {:?}", txt);
         if !txt.is_empty() {
             if let Some(pos) = self.text_input_pos {
                 self.annotations.push(Annotation::Text {
@@ -1068,6 +1124,7 @@ impl ScreenshotApp {
         self.text_input_active = false;
         self.text_input_buffer.clear();
         self.text_input_pos = None;
+        self.ime_preedit.clear();
     }
 
     fn finish_canvas_draw(&mut self) {
@@ -1137,10 +1194,11 @@ impl ScreenshotApp {
             }
             Tool::Text => {
                 let pos = end;
-                info!("文字工具激活: 位置 ({:.0}, {:.0})", pos.x, pos.y);
+                info!("[TextInput] Text tool activated at position ({:.0}, {:.0}), enabling IME", pos.x, pos.y);
                 self.text_input_pos = Some(pos);
                 self.text_input_active = true;
                 self.text_input_buffer.clear();
+                self.ime_preedit.clear();
             }
             Tool::None => {}
         }
@@ -1171,6 +1229,7 @@ impl ScreenshotApp {
                         }
                         self.text_input_active = false;
                         self.text_input_buffer.clear();
+                        self.ime_preedit.clear();
                         return;
                     }
                 }
@@ -1243,18 +1302,48 @@ impl ScreenshotApp {
             return;
         }
 
-        ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Text(text) = event {
-                    self.text_input_buffer.push_str(text);
-                }
-            }
-        });
-
-        // Also handle Backspace
-        if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
-            self.text_input_buffer.pop();
+        if let Some(pos) = self.text_input_pos {
+            let txt = if self.text_input_buffer.is_empty() { " " } else { &self.text_input_buffer };
+            let pre = if self.ime_preedit.is_empty() { "" } else { &self.ime_preedit };
+            let display = format!("{}{}", txt, pre);
+            let galley = ctx.fonts(|f| {
+                f.layout_no_wrap(
+                    display,
+                    egui::FontId::proportional(self.font_size.value()),
+                    self.line_color.to_color32(),
+                )
+            });
+            let cursor_pos = pos + Vec2::new(8.0 + galley.size().x, 4.0);
+            let cursor_rect = egui::Rect::from_min_size(
+                cursor_pos,
+                egui::Vec2::new(1.0, self.font_size.value()),
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::IMERect(cursor_rect));
         }
+
+        apply_text_events(
+            ctx,
+            &mut self.text_input_buffer,
+            &mut self.ime_preedit,
+        );
+    }
+
+    fn ensure_ime(&mut self, ctx: &egui::Context) {
+        if self.text_input_active && self.state == AppState::Canvas {
+            if !self.ime_was_enabled {
+                info!("[IME] First time sending IMEAllowed(true) + IMEPurpose");
+                self.ime_was_enabled = true;
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::IMEPurpose(egui::IMEPurpose::Normal));
+        } else if self.ime_was_enabled {
+            self.ime_was_enabled = false;
+        }
+    }
+
+    fn disable_ime(&self, ctx: &egui::Context) {
+        info!("[IME] Disabling IME");
+        ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
     }
 
     fn render_screenshot(&self, painter: &egui::Painter, screen_rect: Rect) {
@@ -1411,13 +1500,37 @@ impl ScreenshotApp {
         if self.text_input_active {
             if let Some(pos) = self.text_input_pos {
                 let txt = &self.text_input_buffer;
-                let display = if txt.is_empty() { " " } else { txt.as_str() };
+                let pre = &self.ime_preedit;
+                let display = if txt.is_empty() && pre.is_empty() {
+                    " "
+                } else {
+                    txt.as_str()
+                };
                 let size = self.font_size.value();
                 let color = self.line_color.to_color32();
                 let fid = egui::FontId::proportional(size);
+                let fid2 = fid.clone();
+                let fid3 = fid.clone();
+                let fid4 = fid.clone();
+                let fid5 = fid.clone();
 
-                let galley = painter.layout_no_wrap(display.to_string(), fid.clone(), color);
-                let txt_w = galley.size().x.max(10.0);
+                let pre_display = if pre.is_empty() {
+                    String::new()
+                } else {
+                    pre.to_string()
+                };
+
+                let galley = painter.layout_no_wrap(display.to_string(), fid, color);
+                let pre_galley = if !pre_display.is_empty() {
+                    painter.layout_no_wrap(
+                        display.to_string() + &pre_display,
+                        fid2,
+                        color,
+                    )
+                } else {
+                    painter.layout_no_wrap(display.to_string(), fid3, color)
+                };
+                let txt_w = pre_galley.size().x.max(10.0);
                 let txt_h = galley.size().y.max(size + 4.0);
 
                 let bg_rect = Rect::from_min_size(pos, Vec2::new(txt_w + 16.0, txt_h + 8.0));
@@ -1428,11 +1541,24 @@ impl ScreenshotApp {
                 let italic_offset = if self.italic { size * 0.15 } else { 0.0 };
                 let draw_pos = text_pos + Vec2::new(italic_offset, 0.0);
                 if self.bold {
-                    painter.text(draw_pos + Vec2::new(1.2, 0.0), egui::Align2::LEFT_TOP, display, fid.clone(), color);
-                    painter.text(draw_pos + Vec2::new(0.0, 1.0), egui::Align2::LEFT_TOP, display, fid.clone(), color);
+                    painter.text(draw_pos + Vec2::new(1.2, 0.0), egui::Align2::LEFT_TOP, display, fid4.clone(), color);
+                    painter.text(draw_pos + Vec2::new(0.0, 1.0), egui::Align2::LEFT_TOP, display, fid4, color);
                 }
-                painter.text(draw_pos, egui::Align2::LEFT_TOP, display, fid, color);
-                if self.underline && !txt.is_empty() {
+                painter.text(draw_pos, egui::Align2::LEFT_TOP, display, fid5.clone(), color);
+
+                let mut after_x = draw_pos.x + galley.size().x;
+                if !pre_display.is_empty() {
+                    let pre_draw_pos = draw_pos + Vec2::new(galley.size().x, 0.0);
+                    painter.text(pre_draw_pos, egui::Align2::LEFT_TOP, &pre_display, fid5, color);
+                    let underline_y = pre_draw_pos.y + txt_h - 6.0;
+                    painter.line_segment(
+                        [Pos2::new(pre_draw_pos.x, underline_y), Pos2::new(pre_draw_pos.x + pre_galley.size().x - galley.size().x, underline_y)],
+                        Stroke::new(1.5, color),
+                    );
+                    after_x = pre_draw_pos.x + pre_galley.size().x - galley.size().x;
+                }
+
+                if self.underline && !txt.is_empty() && pre.is_empty() {
                     let y = text_pos.y + txt_h - 4.0;
                     painter.line_segment(
                         [Pos2::new(text_pos.x + italic_offset, y), Pos2::new(text_pos.x + txt_w + italic_offset, y)],
@@ -1440,7 +1566,7 @@ impl ScreenshotApp {
                     );
                 }
 
-                let caret_x = text_pos.x + galley.size().x + 1.0;
+                let caret_x = after_x + 1.0;
                 painter.line_segment(
                     [Pos2::new(caret_x, text_pos.y + 2.0), Pos2::new(caret_x, text_pos.y + txt_h - 4.0)],
                     Stroke::new(1.5, color),
@@ -1955,17 +2081,77 @@ impl ScreenshotApp {
     }
 }
 
+fn apply_text_events(ctx: &egui::Context, buf: &mut String, preedit: &mut String) {
+    ctx.input(|i| {
+        for event in &i.events {
+            // Log every event type for debugging
+            let evt_debug = match event {
+                egui::Event::Text(t) => format!("Text({:?})", t),
+                egui::Event::Ime(ie) => format!("Ime({:?})", ie),
+                egui::Event::Key { key, pressed, modifiers, .. } => if *pressed { format!("Key({:?} mod={:?})", key, modifiers) } else { String::new() },
+                egui::Event::PointerMoved(_) => "PointerMoved".into(),
+                egui::Event::PointerButton { button, pressed, .. } => format!("PtrBtn({:?} {})", button, if *pressed {"down"} else {"up"}),
+                egui::Event::PointerGone => "PointerGone".into(),
+                egui::Event::MouseWheel { .. } => "MouseWheel".into(),
+                other => format!("Other({:?})", other),
+            };
+            if !evt_debug.is_empty() {
+                info!("[TextInput] Event: {}", evt_debug);
+            }
+
+            match event {
+                egui::Event::Text(text) => {
+                    buf.push_str(text);
+                }
+                egui::Event::Ime(ime_event) => match ime_event {
+                    egui::ImeEvent::Enabled => {}
+                    egui::ImeEvent::Preedit(text) => {
+                        *preedit = text.clone();
+                    }
+                    egui::ImeEvent::Commit(text) => {
+                        buf.push_str(text);
+                        preedit.clear();
+                    }
+                    egui::ImeEvent::Disabled => {
+                        preedit.clear();
+                    }
+                },
+                _ => {}
+            }
+        }
+    });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
+        if !preedit.is_empty() {
+            preedit.clear();
+        } else {
+            buf.pop();
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
     info!("截图工具启动");
+    info!("[IME] XMODIFIERS={:?} GTK_IM_MODULE={:?} QT_IM_MODULE={:?}",
+        std::env::var("XMODIFIERS").ok(),
+        std::env::var("GTK_IM_MODULE").ok(),
+        std::env::var("QT_IM_MODULE").ok());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_fullscreen(true)
             .with_decorations(false)
             .with_always_on_top(),
+        window_builder: Some(Box::new(|builder| {
+            #[cfg(target_os = "linux")]
+            {
+                info!("[IME] Window builder hook: enabling IME on window creation");
+            }
+            builder
+        })),
         ..Default::default()
     };
 
@@ -1975,4 +2161,203 @@ fn main() {
         Box::new(|_cc| Ok(Box::new(ScreenshotApp::new()))),
     )
     .expect("启动截图工具失败");
+}
+
+#[cfg(test)]
+/// Simplified event for testing text input logic (no egui context needed).
+#[derive(Clone, Debug, PartialEq)]
+enum TextEv {
+    Text(String),
+    Preedit(String),
+    Commit(String),
+    Enabled,
+    Disabled,
+    Backspace,
+    Enter,
+}
+
+#[cfg(test)]
+fn process_text_ev(event: &TextEv, buf: &mut String, preedit: &mut String) {
+    match event {
+        TextEv::Text(t) => buf.push_str(t),
+        TextEv::Enabled => {}
+        TextEv::Preedit(t) => *preedit = t.clone(),
+        TextEv::Commit(t) => {
+            buf.push_str(t);
+            preedit.clear();
+        }
+        TextEv::Disabled => preedit.clear(),
+        TextEv::Backspace => {
+            if !preedit.is_empty() {
+                preedit.clear();
+            } else {
+                buf.pop();
+            }
+        }
+        TextEv::Enter => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_events(events: &[TextEv]) -> (String, String) {
+        let mut buf = String::new();
+        let mut preedit = String::new();
+        for ev in events {
+            process_text_ev(ev, &mut buf, &mut preedit);
+        }
+        (buf, preedit)
+    }
+
+    #[test]
+    fn english_typewriter_input() {
+        let (buf, pre) = run_events(&[
+            TextEv::Text("H".into()),
+            TextEv::Text("e".into()),
+            TextEv::Text("l".into()),
+            TextEv::Text("l".into()),
+            TextEv::Text("o".into()),
+        ]);
+        assert_eq!(buf, "Hello");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn chinese_via_event_text() {
+        // Chinese characters arrive as committed Event::Text
+        let (buf, pre) = run_events(&[
+            TextEv::Text("你".into()),
+            TextEv::Text("好".into()),
+            TextEv::Text("世".into()),
+            TextEv::Text("界".into()),
+        ]);
+        assert_eq!(buf, "你好世界");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn chinese_via_ime_commit() {
+        // IME flow: Preedit displays composing text, Commit finalizes
+        let (buf, pre) = run_events(&[
+            TextEv::Enabled,
+            TextEv::Preedit("n".into()),
+            TextEv::Preedit("ni".into()),
+            TextEv::Preedit("你好".into()),
+            TextEv::Commit("你好".into()),
+        ]);
+        assert_eq!(buf, "你好");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn chinese_multi_word_ime() {
+        // Type two Chinese words through IME
+        let (buf, pre) = run_events(&[
+            TextEv::Enabled,
+            TextEv::Preedit("zhong".into()),
+            TextEv::Preedit("中国".into()),
+            TextEv::Commit("中国".into()),
+            TextEv::Preedit("jia".into()),
+            TextEv::Preedit("加油".into()),
+            TextEv::Commit("加油".into()),
+        ]);
+        assert_eq!(buf, "中国加油");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn chinese_mixed_english() {
+        // Mixed Chinese and English input
+        let (buf, pre) = run_events(&[
+            TextEv::Text("Rust ".into()),
+            TextEv::Enabled,
+            TextEv::Preedit("zhongwen".into()),
+            TextEv::Preedit("中文".into()),
+            TextEv::Commit("中文".into()),
+            TextEv::Text(" is".into()),
+            TextEv::Text(" great".into()),
+        ]);
+        assert_eq!(buf, "Rust 中文 is great");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn ime_preedit_canceled_with_backspace() {
+        // User types in IME, sees preedit, then hits Backspace to cancel
+        let (buf, pre) = run_events(&[
+            TextEv::Enabled,
+            TextEv::Preedit("ni".into()),
+            TextEv::Preedit("你好".into()),
+            TextEv::Backspace,          // clears preedit
+        ]);
+        assert!(buf.is_empty());
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn backspace_deletes_committed_text() {
+        // After committing, backspace deletes committed text
+        let (buf, pre) = run_events(&[
+            TextEv::Text("H".into()),
+            TextEv::Text("i".into()),
+            TextEv::Backspace,
+        ]);
+        assert_eq!(buf, "H");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn chinese_punctuation() {
+        // Chinese punctuation input
+        let (buf, pre) = run_events(&[
+            TextEv::Text("你好".into()),
+            TextEv::Text("，".into()),
+            TextEv::Text("欢迎".into()),
+            TextEv::Text("！".into()),
+        ]);
+        assert_eq!(buf, "你好，欢迎！");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn ime_commit_then_preedit_does_not_overflow() {
+        // After committing, starting a new preedit should work
+        let (buf, pre) = run_events(&[
+            TextEv::Enabled,
+            TextEv::Preedit("中文".into()),
+            TextEv::Commit("中文".into()),
+            TextEv::Preedit("编程".into()),
+        ]);
+        assert_eq!(buf, "中文");
+        assert_eq!(pre, "编程");
+    }
+
+    #[test]
+    fn empty_commit_is_handled() {
+        // Some IMEs might send empty commits
+        let (buf, pre) = run_events(&[
+            TextEv::Enabled,
+            TextEv::Commit("".into()),
+            TextEv::Commit("测试".into()),
+        ]);
+        assert_eq!(buf, "测试");
+        assert!(pre.is_empty());
+    }
+
+    #[test]
+    fn chinese_text_and_enter_same_frame() {
+        // Critical bug scenario: IME commit ("你好") and Enter key arrive in same frame.
+        // handle_text_input must process Event::Text BEFORE Enter key is checked,
+        // otherwise the committed text is lost.
+        let (buf, _pre) = run_events(&[
+            TextEv::Enabled,
+            TextEv::Preedit("ni".into()),
+            TextEv::Preedit("你好".into()),
+            TextEv::Commit("你好".into()),
+            TextEv::Enter,  // arrives same frame as Commit
+        ]);
+        assert_eq!(buf, "你好", "Chinese text should be in buffer before Enter fires finish_text_input");
+    }
 }
